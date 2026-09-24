@@ -1,4 +1,5 @@
 ﻿import { useEffect, useMemo, useState } from 'react'
+import { useRef } from 'react'
 import * as Icons from 'lucide-react'
 import './App.css'
 
@@ -29,13 +30,7 @@ const emptyConstraints = {
   preferred_days: [],
   break_pref: 'Compact',
   max_consecutive: 4,
-  pref_earliest: '07:00',
-  pref_latest: '21:00',
-  avoid_early: false,
-  avoid_night: false,
   minimize_school_days: false,
-  pref_gap: 'Compact',
-  pref_time_of_day: 'Balanced',
 }
 
 const fmtTime = (value) => {
@@ -57,19 +52,35 @@ const overlaps = (a, b) =>
 
 const uid = (prefix) => `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`
 
-const toScheduleEntry = (subject, section) => ({
+const getMeetingSlots = (section) => {
+  if (Array.isArray(section.meetings)) return section.meetings
+  if (section.day && section.time_start && section.time_end) {
+    return [{ id: `${section.id}-meeting`, day: section.day, time_start: section.time_start, time_end: section.time_end, room: section.room || '', instructor: section.instructor || '' }]
+  }
+  return []
+}
+
+const toScheduleEntries = (subject, section) => getMeetingSlots(section).map((meeting) => ({
   id: uid('class'),
   subject_id: subject.id,
   section_id: section.id,
+  meeting_id: meeting.id,
   subject_name: subject.subject_name,
   subject_code: subject.subject_code,
   section_code: section.section_code,
-  day: section.day,
-  time_start: section.time_start,
-  time_end: section.time_end,
-  room: section.room,
-  instructor: section.instructor,
-})
+  day: meeting.day,
+  time_start: meeting.time_start,
+  time_end: meeting.time_end,
+  room: meeting.room || '',
+  instructor: meeting.instructor || '',
+}))
+
+const getSelectedSectionId = (subject, lockedSections = []) => {
+  if (Object.prototype.hasOwnProperty.call(subject, 'selectedSectionId')) return subject.selectedSectionId
+  const sections = Array.isArray(subject.sections) ? subject.sections : []
+  const locked = lockedSections.find((section) => section.subject_id === subject.id)
+  return locked?.id || (sections.find((section) => section.available !== false && section.unavailable !== true) || sections[0])?.id || null
+}
 
 function Icon({ name, size = 18 }) {
   const Component = Icons[name] || Icons.CalendarDays
@@ -86,6 +97,7 @@ function App() {
   const [accountForm, setAccountForm] = useState({ name: '', username: '', email: '', password: '', course: '', year: 'First year' })
   const [view, setView] = useState('schedule')
   const [mode, setMode] = useState('week')
+  const [profileMenuOpen, setProfileMenuOpen] = useState(false)
   const [profile, setProfile] = useState(emptyProfile)
   const [subjects, setSubjects] = useState([])
   const [schedule, setSchedule] = useState([])
@@ -139,9 +151,10 @@ function App() {
     ])
 
     if (locked) {
+      setSubjects((current) => current.map((item) => item.id === subject.id ? { ...item, selectedSectionId: section.id } : item))
       setSchedule((current) => [
         ...current.filter((item) => item.subject_id !== subject.id && item.subject_code !== subject.subject_code),
-        toScheduleEntry(subject, section),
+        ...toScheduleEntries(subject, section),
       ])
       setToast(`${subject.subject_code} ${section.section_code} locked.`)
     } else {
@@ -149,24 +162,17 @@ function App() {
     }
   }
 
-  const addSubject = () => {
+  const addSubject = (details = {}) => {
     const newSubject = {
+      ...details,
       id: uid('sub'),
-      subject_name: 'New Subject',
-      subject_code: 'SUB',
-      sections: [
-        {
-          id: uid('sec'),
-          section_code: '1A',
-          day: 'Monday',
-          time_start: '09:00',
-          time_end: '10:00',
-          room: '',
-          instructor: '',
-        },
-      ],
+      subject_name: details.subject_name || '',
+      subject_code: details.subject_code || '',
+      sections: Array.isArray(details.sections) ? details.sections : [],
+      included: details.included ?? true,
     }
     setSubjects((current) => [...current, newSubject])
+    return newSubject.id
   }
 
   const saveSubject = (subject) => {
@@ -177,10 +183,55 @@ function App() {
       }
       return [...current, { ...subject, id: subject.id || uid('sub') }]
     })
+    const selectedSection = (subject.sections || []).find((section) => section.id === getSelectedSectionId(subject, lockedSections))
+    setLockedSections((current) => current.flatMap((locked) => {
+      if (locked.subject_id !== subject.id) return [locked]
+      return selectedSection?.id === locked.id
+        ? [{ ...selectedSection, subject_id: subject.id, subject_name: subject.subject_name, subject_code: subject.subject_code }]
+        : []
+    }))
+    setSchedule((current) => [
+      ...current.filter((entry) => entry.subject_id !== subject.id),
+      ...(selectedSection ? toScheduleEntries(subject, selectedSection) : []),
+    ])
+  }
+
+  const selectSubjectSection = (subjectId, sectionId, selected) => {
+    const subject = subjects.find((item) => item.id === subjectId)
+    const section = subject?.sections?.find((item) => item.id === sectionId)
+    if (!subject || !section) return
+    const selectedId = getSelectedSectionId(subject, lockedSections)
+    const nextSelection = selected ? sectionId : selectedId === sectionId ? null : selectedId
+    setSubjects((current) => current.map((item) => item.id === subjectId ? { ...item, selectedSectionId: nextSelection } : item))
+    setLockedSections((current) => current.filter((section) => section.subject_id !== subjectId))
+    setSchedule((current) => [
+      ...current.filter((entry) => entry.subject_id !== subjectId),
+      ...(selected ? toScheduleEntries(subject, section) : []),
+    ])
+  }
+
+  const includeSubjectForGeneration = (subjectId, included) => {
+    setSubjects((current) => current.map((subject) => subject.id === subjectId ? { ...subject, included } : subject))
+  }
+
+  const setSectionUnavailable = (subjectId, sectionId, unavailable) => {
+    const subject = subjects.find((item) => item.id === subjectId)
+    const wasSelected = subject && getSelectedSectionId(subject, lockedSections) === sectionId
+    setSubjects((current) => current.map((item) => item.id !== subjectId ? item : {
+      ...item,
+      sections: item.sections.map((section) => section.id === sectionId ? { ...section, unavailable, available: !unavailable } : section),
+      ...(unavailable && wasSelected ? { selectedSectionId: null } : {}),
+    }))
+    if (unavailable && wasSelected) {
+      setSchedule((current) => current.filter((entry) => !(entry.subject_id === subjectId && entry.section_id === sectionId)))
+      setLockedSections((current) => current.filter((entry) => entry.id !== sectionId))
+    }
   }
 
   const removeSubject = (subjectId) => {
     setSubjects((current) => current.filter((subject) => subject.id !== subjectId))
+    setSchedule((current) => current.filter((entry) => entry.subject_id !== subjectId))
+    setLockedSections((current) => current.filter((section) => section.subject_id !== subjectId))
   }
 
   const openClassModal = (entry) => {
@@ -201,6 +252,10 @@ function App() {
   const saveClass = (event) => {
     event.preventDefault()
     if (!editing) return
+    if (!DAYS.includes(editing.day) || toMinutes(editing.time_end) <= toMinutes(editing.time_start)) {
+      setToast('Enter a valid day and an end time later than the start time.')
+      return
+    }
 
     const nextClass = {
       ...editing,
@@ -227,12 +282,33 @@ function App() {
   }
 
   const generateOptions = async () => {
-    const inputSubjects = subjects.filter(
-      (subject) => subject.subject_name?.trim() && subject.subject_code?.trim() && subject.sections?.length > 0,
-    )
-    if (inputSubjects.length === 0) {
+    const includedSubjects = subjects.filter((subject) => subject.included !== false)
+    const hasIncompleteSubject = includedSubjects.some((subject) => {
+      const sections = Array.isArray(subject.sections) ? subject.sections : []
+      const selectedSection = sections.find((section) => section.id === getSelectedSectionId(subject, lockedSections))
+      return !subject.subject_name?.trim() ||
+        !subject.subject_code?.trim() ||
+        !selectedSection ||
+        !selectedSection.section_code?.trim() ||
+        getMeetingSlots(selectedSection).length === 0 ||
+        getMeetingSlots(selectedSection).some((meeting) =>
+          !DAYS.includes(meeting.day) ||
+          !/^\d{2}:\d{2}$/.test(meeting.time_start || '') ||
+          !/^\d{2}:\d{2}$/.test(meeting.time_end || '') ||
+          toMinutes(meeting.time_end) <= toMinutes(meeting.time_start),
+        )
+    })
+    if (hasIncompleteSubject) {
       setGeneratedOptions([])
-      setGenerationIssues(['Add at least one subject and section before generating a schedule.'])
+      setGenerationIssues(['Choose one section for each subject and make sure it has a section code, day, and valid start and end times.'])
+      setSuggestions([])
+      setGenerationWasComplete(true)
+      setModal('review')
+      return
+    }
+    if (includedSubjects.length === 0 && schedule.every((entry) => entry.subject_id)) {
+      setGeneratedOptions([])
+      setGenerationIssues(['Add a subject with sections or add a class to your schedule before generating.'])
       setSuggestions([])
       setGenerationWasComplete(true)
       setModal('review')
@@ -244,19 +320,23 @@ function App() {
       const response = await fetch('/api/schedules/plan', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ subjects, schedule, constraints, lockedSections }),
+        body: JSON.stringify({ subjects: includedSubjects, schedule, constraints, lockedSections }),
       })
-      if (!response.ok) throw new Error('Schedule service unavailable')
       const result = await response.json()
+      if (!response.ok) throw new Error(result.error || `Schedule service returned an error (${response.status}).`)
       setGeneratedOptions(result.options || [])
       setGenerationIssues(result.issues || [])
       setGenerationWasComplete(result.searchedAll !== false)
       setSuggestions(result.suggestions || [])
       setSelectedOption(0)
       setModal('review')
-      setToast(result.options?.length ? 'Conflict-free schedule options generated.' : 'No schedule fits these sections and constraints.')
+      setToast(result.options?.length ? 'Schedule options generated.' : 'No schedule fits these sections and constraints.')
     } catch (error) {
-      setToast('Unable to generate options right now.')
+      setGeneratedOptions([])
+      setGenerationIssues([error.message || 'Unable to generate options right now. Check your connection and try again.'])
+      setGenerationWasComplete(false)
+      setModal('review')
+      setToast('Could not generate schedules.')
     } finally {
       setIsGenerating(false)
     }
@@ -269,7 +349,10 @@ function App() {
   }
 
   const applySuggestion = (suggestion) => {
-    setSchedule((current) => current.map((entry) => (entry.id === suggestion.current.id ? suggestion.alternative : entry)))
+    setSchedule((current) => [
+      ...current.filter((entry) => entry.section_id !== suggestion.current.section_id),
+      ...(suggestion.alternativeEntries || [suggestion.alternative]),
+    ])
     setSuggestions((current) => current.filter((item) => item.current.id !== suggestion.current.id))
     setToast(`${suggestion.current.subject_code} moved to ${suggestion.alternative.day}.`)
   }
@@ -320,8 +403,24 @@ function App() {
   }
 
   const resetSemester = () => {
+    if (!window.confirm('Delete all subjects and classes to start a new semester? This cannot be undone.')) return
     setSchedule([])
-    setToast('Semester reset.')
+    setSubjects([])
+    setLockedSections([])
+    setConstraints(emptyConstraints)
+    setToast('All subjects and classes were cleared.')
+  }
+
+  const clearCalendar = () => {
+    setSchedule([])
+    setLockedSections([])
+    setSubjects((current) => current.map((subject) => ({ ...subject, included: false, selectedSectionId: null })))
+    setToast('Calendar cleared and subjects unselected.')
+  }
+
+  const resetConstraints = () => {
+    setConstraints(emptyConstraints)
+    setToast('Constraints reset.')
   }
 
   const handleLogin = async () => {
@@ -407,6 +506,7 @@ function App() {
     setSchedule([])
     setLockedSections([])
     setConstraints(emptyConstraints)
+    setProfileMenuOpen(false)
     setToast('You have been signed out.')
   }
 
@@ -525,7 +625,7 @@ function App() {
                     key={tab}
                     type="button"
                     className={view === tab ? 'nav active' : 'nav'}
-                    onClick={() => setView(tab)}
+                    onClick={() => { setView(tab); setProfileMenuOpen(false) }}
                   >
                     {tab === 'schedule' ? 'My Schedule' : tab === 'subjects' ? 'Subjects' : 'Settings'}
                   </button>
@@ -534,23 +634,30 @@ function App() {
             </div>
 
             <div className="top-actions">
-              <div className="profile-badge">
+              <div className="profile-menu-wrap">
+                <button type="button" className="profile-badge profile-menu-button" onClick={() => setProfileMenuOpen((open) => !open)} aria-expanded={profileMenuOpen}>
                 <span className="avatar">{initials}</span>
                 <span>{profile.profile_name || 'Student Planner'}</span>
+                  <Icon name="ChevronDown" size={15} />
+                </button>
+                {profileMenuOpen && <div className="profile-dropdown">
+                  <button type="button" onClick={() => { setView('settings'); setProfileMenuOpen(false) }}><Icon name="UserRound" size={16} /> Account</button>
+                  <button type="button" onClick={handleLogout}><Icon name="LogOut" size={16} /> Log out</button>
+                </div>}
               </div>
-              <button type="button" className="btn primary" onClick={generateOptions} disabled={isGenerating}>
-                <Icon name="Sparkles" size={16} />
-                {isGenerating ? 'Building...' : 'Generate'}
-              </button>
-              <button type="button" className="btn secondary" onClick={savePlannerState} disabled={isSaving}>
-                <Icon name="CloudUpload" size={16} />
-                {isSaving ? 'Saving...' : 'Save'}
-              </button>
-              <button type="button" className="icon-btn" onClick={handleLogout} title="Log out" aria-label="Log out"><Icon name="LogOut" size={16} /></button>
             </div>
           </header>
 
-          <div className="workspace">
+          <div className={view === 'schedule' ? 'workspace schedule-workspace' : 'workspace single-workspace'}>
+            {view === 'schedule' && (
+              <SubjectPoolPanel
+                subjects={subjects}
+                lockedSections={lockedSections}
+                onSelectSection={selectSubjectSection}
+                onIncludeSubject={includeSubjectForGeneration}
+                onManageSubjects={() => setView('subjects')}
+              />
+            )}
             <main className="content card">
               {view === 'schedule' && (
                 <ScheduleView
@@ -563,6 +670,9 @@ function App() {
                   openClassModal={openClassModal}
                   removeClass={removeClass}
                   setEditing={setEditing}
+                  onSave={savePlannerState}
+                  onClear={clearCalendar}
+                  isSaving={isSaving}
                 />
               )}
 
@@ -574,15 +684,16 @@ function App() {
                   onRemove={removeSubject}
                   isSectionLocked={isSectionLocked}
                   onToggleLock={toggleLock}
+                  onToggleUnavailable={setSectionUnavailable}
                 />
               )}
 
               {view === 'settings' && (
-                <SettingsPanel profile={profile} setProfile={setProfile} resetSemester={resetSemester} />
+                <SettingsPanel profile={profile} setProfile={setProfile} resetSemester={resetSemester} onSave={savePlannerState} isSaving={isSaving} />
               )}
             </main>
 
-            <ConstraintRail constraints={constraints} setConstraints={setConstraints} />
+            {view === 'schedule' && <ConstraintRail constraints={constraints} setConstraints={setConstraints} onGenerate={generateOptions} isGenerating={isGenerating} onReset={resetConstraints} />}
           </div>
         </>
       )}
@@ -670,8 +781,8 @@ function App() {
                     onClick={() => setSelectedOption(index)}
                   >
                     <strong>Option {index + 1}</strong>
-                    <span>{option.schedule.length} of {subjects.length} subjects · Preference score {option.metrics.score}/100</span>
-                    <small>0 conflicts · {option.metrics.school_days} days · {option.metrics.gaps}h gaps · longest run {option.metrics.longest_consecutive_hours}h</small>
+                    <span>{new Set(option.schedule.filter((entry) => entry.subject_id).map((entry) => entry.subject_id)).size} of {subjects.filter((subject) => subject.included !== false).length} subjects · Preference score {option.metrics.score}/100</span>
+                    <small>{option.metrics.conflicts} conflicts · {option.metrics.school_days} days · {option.metrics.gaps}h gaps · longest run {option.metrics.longest_consecutive_hours}h</small>
                   </button>
                 ))
               ) : (
@@ -692,7 +803,107 @@ function App() {
   )
 }
 
-function ScheduleView({ schedule, mode, setMode, conflicts, suggestions, applySuggestion, openClassModal, removeClass }) {
+function SubjectPoolPanel({ subjects, lockedSections, onSelectSection, onIncludeSubject, onManageSubjects }) {
+  const [query, setQuery] = useState('')
+  const [expandedSubjects, setExpandedSubjects] = useState({})
+  const normalizedQuery = query.trim().toLowerCase()
+  const visibleSubjects = subjects.filter((subject) =>
+    `${subject.subject_code} ${subject.subject_name}`.toLowerCase().includes(normalizedQuery),
+  )
+  const allExpanded = visibleSubjects.length > 0 && visibleSubjects.every((subject) => expandedSubjects[subject.id])
+  const toggleAll = () => setExpandedSubjects(Object.fromEntries(visibleSubjects.map((subject) => [subject.id, !allExpanded])))
+
+  return (
+    <aside className="subject-pool-panel card">
+      <div className="subject-pool-heading">
+        <div>
+          <p className="eyebrow">Choose sections</p>
+          <h2>Subject Pool</h2>
+        </div>
+        <button type="button" className="icon-btn" onClick={onManageSubjects} title="Manage subjects" aria-label="Manage subjects"><Icon name="Settings2" size={16} /></button>
+      </div>
+      <label className="subject-pool-search">
+        <Icon name="Search" size={16} />
+        <input
+          type="search"
+          value={query}
+          onChange={(event) => setQuery(event.target.value)}
+          placeholder="Search subjects or codes"
+          aria-label="Search subjects or codes"
+        />
+      </label>
+
+      {subjects.length > 0 && (
+        <button type="button" className="pool-expand-all" onClick={toggleAll}>
+          <Icon name={allExpanded ? 'ChevronsUp' : 'ChevronsDown'} size={15} />
+          {allExpanded ? 'Collapse all' : 'Expand all'}
+        </button>
+      )}
+
+      {subjects.length === 0 ? (
+        <div className="subject-pool-empty">
+          <p>Add subjects and their available sections to start building your schedule.</p>
+          <button type="button" className="btn primary full" onClick={onManageSubjects}>Add subjects</button>
+        </div>
+      ) : visibleSubjects.length === 0 ? (
+        <p className="subject-pool-empty">No subjects match “{query}”.</p>
+      ) : (
+        <div className="subject-pool-list">
+          {visibleSubjects.map((subject) => {
+            const sections = Array.isArray(subject.sections) ? subject.sections : []
+            const selectedSectionId = getSelectedSectionId(subject, lockedSections)
+            const selectedCount = sections.some((section) => section.id === selectedSectionId) ? 1 : 0
+            return (
+              <article key={subject.id} className="subject-pool-group">
+                <div className="subject-pool-group-head">
+                  <label className="pool-include-toggle" title="Include this subject in schedule generation">
+                    <input type="checkbox" checked={subject.included !== false} onChange={(event) => onIncludeSubject(subject.id, event.target.checked)} />
+                    <span>Include</span>
+                  </label>
+                  <button
+                    type="button"
+                    className="pool-subject-toggle"
+                    aria-expanded={Boolean(expandedSubjects[subject.id])}
+                    onClick={() => setExpandedSubjects((current) => ({ ...current, [subject.id]: !current[subject.id] }))}
+                  >
+                  <span className="subject-pool-title">
+                    <strong>{subject.subject_code || 'New subject'}</strong>
+                    <small>{subject.subject_name || 'Add a subject name'}</small>
+                  </span>
+                  <span className="subject-pool-count">{selectedCount} selected</span>
+                    <Icon name={expandedSubjects[subject.id] ? 'ChevronUp' : 'ChevronDown'} size={16} />
+                  </button>
+                </div>
+                {expandedSubjects[subject.id] && <div className="pool-section-list">
+                  {sections.length === 0 ? <p className="pool-no-sections">No sections yet. Add them on the Subjects page.</p> : sections.map((section) => {
+                    const meetings = getMeetingSlots(section)
+                    const unavailable = section.unavailable === true || section.available === false
+                    return (
+                    <label key={section.id} className="pool-section-option">
+                      <input
+                        type="checkbox"
+                        checked={selectedSectionId === section.id}
+                        disabled={unavailable}
+                        onChange={(event) => onSelectSection(subject.id, section.id, event.target.checked)}
+                      />
+                      <span>
+                        <strong>{section.section_code || 'Section'}{unavailable ? ' · Unavailable' : ''}</strong>
+                        <small>{meetings.length ? meetings.map((meeting) => `${meeting.day.slice(0, 3)} ${fmtTime(meeting.time_start)}–${fmtTime(meeting.time_end)}`).join(' · ') : 'No meeting times added'}</small>
+                      </span>
+                    </label>
+                    )
+                  })}
+                </div>}
+              </article>
+            )
+          })}
+        </div>
+      )}
+    </aside>
+  )
+}
+
+function ScheduleView({ schedule, mode, setMode, conflicts, suggestions, applySuggestion, openClassModal, removeClass, onSave, onClear, isSaving }) {
   return (
     <section className="page-panel">
       <div className="page-head">
@@ -703,6 +914,8 @@ function ScheduleView({ schedule, mode, setMode, conflicts, suggestions, applySu
         <div className="head-buttons">
           <button type="button" className={mode === 'week' ? 'btn primary' : 'btn secondary'} onClick={() => setMode('week')}>Week</button>
           <button type="button" className={mode === 'list' ? 'btn primary' : 'btn secondary'} onClick={() => setMode('list')}>List</button>
+          <button type="button" className="btn secondary" onClick={onSave} disabled={isSaving}><Icon name="CloudUpload" size={15} /> {isSaving ? 'Saving...' : 'Save'}</button>
+          <button type="button" className="btn secondary" onClick={onClear}><Icon name="RotateCcw" size={15} /> Clear</button>
         </div>
       </div>
 
@@ -735,7 +948,7 @@ function ScheduleView({ schedule, mode, setMode, conflicts, suggestions, applySu
           <Icon name="CalendarPlus" size={42} />
           <h2>Your week is ready.</h2>
           <p>Choose subject sections or add a class manually.</p>
-          <button type="button" className="btn primary" onClick={() => openClassModal()}>Add class</button>
+          <button type="button" className="btn primary" onClick={() => openClassModal()}>Add class manually</button>
         </div>
       ) : mode === 'week' ? (
         <WeekGrid schedule={schedule} openClassModal={openClassModal} />
@@ -806,129 +1019,281 @@ function ListView({ schedule, openClassModal, removeClass }) {
   )
 }
 
-function SubjectsPanel({ subjects, onAddSubject, onSave, onRemove, isSectionLocked, onToggleLock }) {
+function SubjectsPanel({ subjects, onAddSubject, onSave, onRemove, isSectionLocked, onToggleLock, onToggleUnavailable }) {
+  const [query, setQuery] = useState('')
+  const [selectedSubjectId, setSelectedSubjectId] = useState(() => subjects[0]?.id || '')
+  const [subjectDraft, setSubjectDraft] = useState({ subject_name: '', subject_code: '' })
+  const [editingSectionId, setEditingSectionId] = useState('')
+  const [sectionDraft, setSectionDraft] = useState(null)
+  const [sectionError, setSectionError] = useState('')
+  const [importDraft, setImportDraft] = useState(null)
+  const [importMessage, setImportMessage] = useState('')
+  const imageInput = useRef(null)
+  const selectedSubject = subjects.find((subject) => subject.id === selectedSubjectId)
+  const visibleSubjects = subjects.filter((subject) => `${subject.subject_code} ${subject.subject_name}`.toLowerCase().includes(query.trim().toLowerCase()))
+
+  useEffect(() => {
+    if (selectedSubjectId && subjects.some((subject) => subject.id === selectedSubjectId)) return
+    setSelectedSubjectId(subjects[0]?.id || '')
+  }, [subjects, selectedSubjectId])
+
+  useEffect(() => {
+    setSubjectDraft(selectedSubject
+      ? { subject_name: selectedSubject.subject_name || '', subject_code: selectedSubject.subject_code || '' }
+      : { subject_name: '', subject_code: '' })
+    setEditingSectionId('')
+    setSectionDraft(null)
+    setSectionError('')
+  }, [selectedSubjectId])
+
+  const handleAddSubject = () => {
+    const id = onAddSubject()
+    setSelectedSubjectId(id)
+  }
+
+  const saveSubjectDetails = () => {
+    if (!selectedSubject) return
+    if (!subjectDraft.subject_name.trim() || !subjectDraft.subject_code.trim()) {
+      setSectionError('Enter both a subject name and subject code.')
+      return
+    }
+    onSave({ ...selectedSubject, ...subjectDraft })
+    setSectionError('Subject details saved.')
+  }
+
+  const cancelSubjectDetails = () => {
+    setSubjectDraft({ subject_name: selectedSubject?.subject_name || '', subject_code: selectedSubject?.subject_code || '' })
+    setSectionError('Changes discarded.')
+  }
+
+  const editSection = (section, isNew = false) => {
+    setEditingSectionId(section.id)
+    setSectionDraft({
+      ...section,
+      section_code: section.section_code || '',
+      meetings: getMeetingSlots(section).map((meeting) => ({ ...meeting, id: meeting.id || uid('meeting') })),
+    })
+    setSectionError('')
+    if (isNew) setSectionDraft({ ...section, section_code: '', meetings: [] })
+  }
+
+  const addSection = () => editSection({ id: uid('section'), section_code: '', meetings: [], unavailable: false }, true)
+
+  const updateMeeting = (meetingId, changes) => setSectionDraft((current) => ({
+    ...current,
+    meetings: current.meetings.map((meeting) => meeting.id === meetingId ? { ...meeting, ...changes } : meeting),
+  }))
+
+  const addMeeting = () => setSectionDraft((current) => ({
+    ...current,
+    meetings: [...current.meetings, { id: uid('meeting'), day: 'Monday', time_start: '09:00', time_end: '10:00', room: '', instructor: '' }],
+  }))
+
+  const saveSection = (event) => {
+    event.preventDefault()
+    if (!selectedSubject || !sectionDraft) return
+    const validMeetings = sectionDraft.meetings.length > 0 && sectionDraft.meetings.every((meeting) =>
+      DAYS.includes(meeting.day) && /^\d{2}:\d{2}$/.test(meeting.time_start) && /^\d{2}:\d{2}$/.test(meeting.time_end) && toMinutes(meeting.time_end) > toMinutes(meeting.time_start),
+    )
+    if (!sectionDraft.section_code.trim() || !validMeetings) {
+      setSectionError('Enter a section code and at least one valid meeting day and time.')
+      return
+    }
+    const sections = selectedSubject.sections || []
+    const nextSections = sections.some((section) => section.id === sectionDraft.id)
+      ? sections.map((section) => section.id === sectionDraft.id ? sectionDraft : section)
+      : [...sections, sectionDraft]
+    onSave({ ...selectedSubject, sections: nextSections })
+    setEditingSectionId('')
+    setSectionDraft(null)
+    setSectionError('Section saved.')
+  }
+
+  const cancelSectionEdit = () => {
+    setEditingSectionId('')
+    setSectionDraft(null)
+    setSectionError('Section changes discarded.')
+  }
+
+  const deleteSection = (sectionId) => {
+    if (!selectedSubject) return
+    const nextSections = selectedSubject.sections.filter((section) => section.id !== sectionId)
+    const updated = { ...selectedSubject, sections: nextSections }
+    if (getSelectedSectionId(selectedSubject, []) === sectionId) updated.selectedSectionId = null
+    onSave(updated)
+    setSectionError('Section deleted.')
+  }
+
+  const parseOCRMeetings = (rows) => {
+    const dayPattern = /\b(Sunday|Sun|Monday|Mon|Tuesday|Tue|Wednesday|Wed|Thursday|Thu|Friday|Fri|Saturday|Sat)\b/gi
+    const timePattern = /\b(1[0-2]|0?[1-9]|2[0-3])(?::([0-5]\d))?\s*(AM|PM)?\b/gi
+    const names = { sun: 'Sunday', mon: 'Monday', tue: 'Tuesday', wed: 'Wednesday', thu: 'Thursday', fri: 'Friday', sat: 'Saturday' }
+    const parseTime = (match) => {
+      let hour = Number(match[1])
+      const minute = Number(match[2] || 0)
+      const meridiem = (match[3] || '').toUpperCase()
+      if (meridiem) hour = (hour % 12) + (meridiem === 'PM' ? 12 : 0)
+      if (hour > 23) return null
+      return `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`
+    }
+    const meetings = []
+    rows.forEach((row) => {
+      const days = [...row.matchAll(dayPattern)].map((match) => names[match[1].slice(0, 3).toLowerCase()])
+      if (!days.length) return
+      const timeText = row.slice(row.search(dayPattern))
+      const times = [...timeText.matchAll(timePattern)].map(parseTime).filter(Boolean)
+      if (times.length < 2) return
+      days.forEach((day, index) => {
+        const pairIndex = times.length >= days.length * 2 ? index * 2 : 0
+        const timeStart = times[pairIndex]
+        const timeEnd = times[pairIndex + 1]
+        if (timeStart && timeEnd && toMinutes(timeEnd) > toMinutes(timeStart)) {
+          meetings.push({ id: uid('meeting'), day, time_start: timeStart, time_end: timeEnd, room: '', instructor: '' })
+        }
+      })
+    })
+    return meetings
+  }
+
+  const importImage = async (event) => {
+    const file = event.target.files?.[0]
+    event.target.value = ''
+    if (!file) return
+    if (!window.TextDetector || !window.createImageBitmap) {
+      setImportMessage('Built-in image text recognition is unavailable in this browser. You can still add the subject and sections manually.')
+      return
+    }
+    try {
+      const bitmap = await window.createImageBitmap(file)
+      const detector = new window.TextDetector()
+      const detections = await detector.detect(bitmap)
+      const rows = detections.map((item) => item.rawValue?.trim()).filter(Boolean)
+      const recognizedText = rows.join('\n')
+      if (!rows.length) {
+        setImportMessage('No text was detected. Try a clearer screenshot or enter the subject manually.')
+        return
+      }
+      const code = recognizedText.match(/\b[A-Z]{2,}\s?-?\d{2,}[A-Z0-9]*\b/i)?.[0] || ''
+      const meetings = parseOCRMeetings(rows)
+      setImportDraft({
+        subject_name: '',
+        subject_code: code,
+        sections: meetings.length ? [{ id: uid('section'), section_code: 'A', meetings, unavailable: false }] : [],
+        recognizedText,
+      })
+      setImportMessage(meetings.length ? `Recognized ${meetings.length} meeting slot(s). Review the imported subject after saving.` : 'Text was recognized, but no day/time pairs were confidently detected. You can still import the subject and add its section times manually.')
+    } catch {
+      setImportMessage('Image recognition failed. Try a different screenshot or enter the subject manually.')
+    }
+  }
+
+  const saveImportedSubject = () => {
+    if (!importDraft?.subject_name.trim() || !importDraft?.subject_code.trim()) {
+      setImportMessage('Enter a subject name and code before adding it to the pool.')
+      return
+    }
+    const id = onAddSubject({ subject_name: importDraft.subject_name, subject_code: importDraft.subject_code, sections: importDraft.sections })
+    setSelectedSubjectId(id)
+    setImportDraft(null)
+    setImportMessage('Imported subject added. Review its sections for accuracy.')
+  }
+
   return (
-    <section className="page-panel">
+    <section className="page-panel subjects-page">
       <div className="page-head">
-        <div>
-          <p className="eyebrow">Your plan</p>
-          <h1>My Subjects</h1>
+        <div><p className="eyebrow">Course data</p><h1>Subjects</h1></div>
+        <div className="subject-page-actions">
+          <input ref={imageInput} className="visually-hidden" type="file" accept="image/*" onChange={importImage} />
+          <button type="button" className="btn secondary" onClick={() => imageInput.current?.click()}><Icon name="ImageUp" size={16} /> Import from image</button>
+          <button type="button" className="btn primary" onClick={handleAddSubject}><Icon name="Plus" size={16} /> Add new subject</button>
         </div>
-        <button type="button" className="btn primary" onClick={onAddSubject}>
-          <Icon name="Plus" size={16} />
-          Add subject
-        </button>
+      </div>
+      {importMessage && <p className="form-hint import-message" role="status">{importMessage}</p>}
+
+      <div className="subject-manager-grid">
+        <aside className="subject-library panel">
+          <label className="subject-pool-search"><Icon name="Search" size={16} /><input type="search" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search subject or code" aria-label="Search subject or code" /></label>
+          <div className="subject-library-list">
+            {visibleSubjects.map((subject) => (
+              <button type="button" key={subject.id} className={subject.id === selectedSubjectId ? 'subject-library-item active' : 'subject-library-item'} onClick={() => setSelectedSubjectId(subject.id)}>
+                <strong>{subject.subject_code || 'New subject'}</strong>
+                <span>{subject.subject_name || 'Untitled subject'}</span>
+                <small>{subject.sections?.length || 0} section(s)</small>
+              </button>
+            ))}
+            {!visibleSubjects.length && <p className="subject-pool-empty">{subjects.length ? 'No subjects match your search.' : 'Your subject pool is empty.'}</p>}
+          </div>
+        </aside>
+
+        <div className="subject-detail panel">
+          {selectedSubject ? <>
+            <div className="subject-detail-heading">
+              <div><p className="eyebrow">Subject information</p><h2>{selectedSubject.subject_name || 'New subject'}</h2></div>
+              <button type="button" className="icon-btn danger" title="Delete subject" aria-label="Delete subject" onClick={() => { onRemove(selectedSubject.id); setSelectedSubjectId('') }}><Icon name="Trash2" size={16} /></button>
+            </div>
+            <div className="form-grid two subject-detail-fields">
+              <label>Subject name<input value={subjectDraft.subject_name} onChange={(event) => setSubjectDraft({ ...subjectDraft, subject_name: event.target.value })} placeholder="e.g. Software Engineering 1" /></label>
+              <label>Subject code<input value={subjectDraft.subject_code} onChange={(event) => setSubjectDraft({ ...subjectDraft, subject_code: event.target.value })} placeholder="e.g. CCSFEN1L" /></label>
+            </div>
+            <div className="subject-detail-actions">
+              <button type="button" className="btn primary" onClick={saveSubjectDetails}><Icon name="Save" size={15} /> Save changes</button>
+              <button type="button" className="btn secondary" onClick={cancelSubjectDetails}>Cancel</button>
+            </div>
+
+            <div className="section-list-heading"><div><h3>Sections</h3><p>Each section can have multiple weekly meeting slots.</p></div>
+              <button type="button" className="btn secondary" onClick={addSection}><Icon name="Plus" size={15} /> Add section</button>
+            </div>
+            <div className="subject-section-list">
+              {(selectedSubject.sections || []).map((section) => {
+                const meetings = getMeetingSlots(section)
+                const unavailable = section.unavailable === true || section.available === false
+                return <article key={section.id} className={unavailable ? 'subject-section-card unavailable' : 'subject-section-card'}>
+                  <div className="subject-section-card-head">
+                    <div><strong>{section.section_code || 'Untitled section'}</strong><small>{meetings.length} meeting slot(s){unavailable ? ' · Unavailable' : ''}</small></div>
+                    <div className="section-actions">
+                      <button type="button" className="btn secondary compact" onClick={() => editSection(section)}><Icon name="Pencil" size={14} /> Edit</button>
+                      <button type="button" className="btn secondary compact" onClick={() => onToggleUnavailable(selectedSubject.id, section.id, !unavailable)}>{unavailable ? 'Mark available' : 'Mark unavailable'}</button>
+                      {!unavailable && <button type="button" className={isSectionLocked(selectedSubject, section) ? 'icon-btn locked' : 'icon-btn'} title={isSectionLocked(selectedSubject, section) ? 'Unlock section' : 'Lock section'} onClick={() => onToggleLock(selectedSubject, section, !isSectionLocked(selectedSubject, section))}><Icon name="LockKeyhole" size={14} /></button>}
+                      <button type="button" className="icon-btn danger" title="Delete section" aria-label="Delete section" onClick={() => deleteSection(section.id)}><Icon name="Trash2" size={14} /></button>
+                    </div>
+                  </div>
+                  <div className="section-meeting-summary">{meetings.map((meeting) => <span key={meeting.id}>{meeting.day} · {fmtTime(meeting.time_start)}–{fmtTime(meeting.time_end)}{meeting.room ? ` · ${meeting.room}` : ''}</span>)}</div>
+                </article>
+              })}
+              {!selectedSubject.sections?.length && <p className="subject-pool-empty">No sections yet. Add a section to enter its meeting days and times.</p>}
+            </div>
+
+            {sectionDraft && <form className="section-edit-form" onSubmit={saveSection}>
+              <div className="section-list-heading"><div><h3>{selectedSubject.sections?.some((section) => section.id === editingSectionId) ? 'Edit section' : 'New section'}</h3><p>Set section details and one or more meeting slots.</p></div></div>
+              <label>Section code<input value={sectionDraft.section_code} onChange={(event) => setSectionDraft({ ...sectionDraft, section_code: event.target.value })} placeholder="e.g. A1" /></label>
+              {sectionDraft.meetings.map((meeting) => <div key={meeting.id} className="meeting-slot-editor">
+                <label>Day<select value={meeting.day} onChange={(event) => updateMeeting(meeting.id, { day: event.target.value })}>{DAYS.map((day) => <option key={day} value={day}>{day}</option>)}</select></label>
+                <label>Start<input type="time" value={meeting.time_start} onChange={(event) => updateMeeting(meeting.id, { time_start: event.target.value })} /></label>
+                <label>End<input type="time" value={meeting.time_end} onChange={(event) => updateMeeting(meeting.id, { time_end: event.target.value })} /></label>
+                <button type="button" className="icon-btn danger" title="Delete meeting slot" aria-label="Delete meeting slot" onClick={() => setSectionDraft((current) => ({ ...current, meetings: current.meetings.filter((item) => item.id !== meeting.id) }))}><Icon name="Trash2" size={14} /></button>
+              </div>)}
+              <button type="button" className="btn secondary" onClick={addMeeting}><Icon name="Plus" size={15} /> Add meeting slot</button>
+              {sectionError && <p className="form-hint" role="status">{sectionError}</p>}
+              <div className="modal-actions"><button type="button" className="btn secondary" onClick={cancelSectionEdit}>Cancel</button><button type="submit" className="btn primary">Save section</button></div>
+            </form>}
+          </> : <div className="empty-state subject-empty-state"><Icon name="BookOpen" size={40} /><h2>Select or add a subject</h2><p>Subject details and sections will appear here.</p><button type="button" className="btn primary" onClick={handleAddSubject}>Add new subject</button></div>}
+        </div>
       </div>
 
-      {subjects.length === 0 && (
-        <div className="empty-state subject-empty-state">
-          <Icon name="BookOpen" size={42} />
-          <h2>Start with your subjects.</h2>
-          <p>Add the courses you are taking, then add each available section.</p>
-          <button type="button" className="btn primary" onClick={onAddSubject}>Add your first subject</button>
-        </div>
-      )}
-
-      <div className="subjects-grid">
-        {subjects.map((subject) => (
-          <article key={subject.id} className="subject-editor panel">
-            <div className="editor-head">
-              <div>
-                <strong>{subject.subject_code}</strong>
-                <small>{subject.subject_name}</small>
-              </div>
-              <button type="button" className="icon-btn danger" onClick={() => onRemove(subject.id)}><Icon name="Trash2" size={15} /></button>
-            </div>
-
-            <div className="form-grid two">
-              <label>
-                Subject name
-                <input value={subject.subject_name} onChange={(event) => onSave({ ...subject, subject_name: event.target.value })} />
-              </label>
-              <label>
-                Code
-                <input value={subject.subject_code} onChange={(event) => onSave({ ...subject, subject_code: event.target.value })} />
-              </label>
-            </div>
-
-            <div className="section-stack">
-              {subject.sections.map((section) => (
-                <div key={section.id} className="section-editor-block">
-                  <div className="section-editor-heading">
-                    <span>{isSectionLocked(subject, section) ? 'Preferred section locked' : 'Available section'}</span>
-                    <button
-                      type="button"
-                      className={isSectionLocked(subject, section) ? 'lock-btn locked' : 'lock-btn'}
-                      onClick={() => onToggleLock(subject, section, !isSectionLocked(subject, section))}
-                      title={isSectionLocked(subject, section) ? 'Unlock preferred section' : 'Lock preferred section'}
-                      aria-label={isSectionLocked(subject, section) ? 'Unlock preferred section' : 'Lock preferred section'}
-                    >
-                      <Icon name={isSectionLocked(subject, section) ? 'LockKeyhole' : 'LockKeyholeOpen'} size={15} />
-                    </button>
-                  </div>
-                  <div className="form-grid three">
-                    <label>
-                      Section
-                      <input value={section.section_code} onChange={(event) => onSave({ ...subject, sections: subject.sections.map((item) => item.id === section.id ? { ...item, section_code: event.target.value } : item) })} />
-                    </label>
-                    <label>
-                      Day
-                      <select value={section.day} onChange={(event) => onSave({ ...subject, sections: subject.sections.map((item) => item.id === section.id ? { ...item, day: event.target.value } : item) })}>
-                        {DAYS.map((day) => <option key={day} value={day}>{day}</option>)}
-                      </select>
-                    </label>
-                    <label>
-                      Room
-                      <input value={section.room} onChange={(event) => onSave({ ...subject, sections: subject.sections.map((item) => item.id === section.id ? { ...item, room: event.target.value } : item) })} />
-                    </label>
-                    <label>
-                      Start
-                      <input type="time" value={section.time_start} onChange={(event) => onSave({ ...subject, sections: subject.sections.map((item) => item.id === section.id ? { ...item, time_start: event.target.value } : item) })} />
-                    </label>
-                    <label>
-                      End
-                      <input type="time" value={section.time_end} onChange={(event) => onSave({ ...subject, sections: subject.sections.map((item) => item.id === section.id ? { ...item, time_end: event.target.value } : item) })} />
-                    </label>
-                    <label>
-                      Instructor
-                      <input value={section.instructor} onChange={(event) => onSave({ ...subject, sections: subject.sections.map((item) => item.id === section.id ? { ...item, instructor: event.target.value } : item) })} />
-                    </label>
-                  </div>
-                </div>
-              ))}
-            </div>
-
-            <button
-              type="button"
-              className="btn secondary full"
-              onClick={() =>
-                onSave({
-                  ...subject,
-                  sections: [
-                    ...subject.sections,
-                    {
-                      id: uid('sec'),
-                      section_code: 'A',
-                      day: 'Monday',
-                      time_start: '09:00',
-                      time_end: '10:00',
-                      room: '',
-                      instructor: '',
-                    },
-                  ],
-                })
-              }
-            >
-              Add section
-            </button>
-          </article>
-        ))}
-      </div>
+      {importDraft && <div className="modal-backdrop" onClick={() => setImportDraft(null)}><div className="modal-card import-modal" onClick={(event) => event.stopPropagation()}>
+        <div className="modal-header"><h3>Review imported subject</h3><button type="button" className="icon-btn" onClick={() => setImportDraft(null)}><Icon name="X" size={16} /></button></div>
+        <p className="form-hint">OCR is experimental. Check the extracted information before adding it to your subject pool.</p>
+        <label>Subject name<input value={importDraft.subject_name} onChange={(event) => setImportDraft({ ...importDraft, subject_name: event.target.value })} /></label>
+        <label>Subject code<input value={importDraft.subject_code} onChange={(event) => setImportDraft({ ...importDraft, subject_code: event.target.value })} /></label>
+        <p className="form-hint">Detected meeting slots: {importDraft.sections.reduce((sum, section) => sum + section.meetings.length, 0)}. You can correct all details after importing.</p>
+        <details className="ocr-text-details"><summary>Show recognized text</summary><pre>{importDraft.recognizedText}</pre></details>
+        <div className="modal-actions"><button type="button" className="btn secondary" onClick={() => setImportDraft(null)}>Cancel</button><button type="button" className="btn primary" onClick={saveImportedSubject}>Save to subject pool</button></div>
+      </div></div>}
     </section>
   )
 }
 
-function SettingsPanel({ profile, setProfile, resetSemester }) {
+function SettingsPanel({ profile, setProfile, resetSemester, onSave, isSaving }) {
   return (
     <section className="page-panel">
       <div className="page-head">
@@ -967,6 +1332,7 @@ function SettingsPanel({ profile, setProfile, resetSemester }) {
               </select>
             </label>
           </div>
+          <button type="button" className="btn primary" onClick={onSave} disabled={isSaving}><Icon name="Save" size={15} /> {isSaving ? 'Saving...' : 'Save account'}</button>
         </article>
 
         <article className="settings-card card">
@@ -985,17 +1351,27 @@ function SettingsPanel({ profile, setProfile, resetSemester }) {
               <input type="checkbox" checked={profile.theme_pref === 'dark'} onChange={(event) => setProfile({ ...profile, theme_pref: event.target.checked ? 'dark' : 'light' })} />
             </label>
           </div>
-          <button type="button" className="btn danger" onClick={resetSemester}>Reset semester</button>
+          <div className="settings-danger-zone">
+            <h3>New semester</h3>
+            <p>Remove all subjects and classes so you can enter a new set of courses.</p>
+            <button type="button" className="btn danger" onClick={resetSemester}>Delete all classes</button>
+          </div>
         </article>
       </div>
     </section>
   )
 }
 
-function ConstraintRail({ constraints, setConstraints }) {
+function ConstraintRail({ constraints, setConstraints, onGenerate, isGenerating, onReset }) {
   return (
     <aside className="constraint-rail card">
-      <h2>Constraints</h2>
+      <div className="constraint-head">
+        <h2>Constraints</h2>
+        <button type="button" className="btn primary" onClick={onGenerate} disabled={isGenerating}>
+          <Icon name="Sparkles" size={15} /> {isGenerating ? 'Generating…' : 'Generate'}
+        </button>
+        <button type="button" className="btn secondary full" onClick={onReset}>Reset constraints</button>
+      </div>
 
       <fieldset>
         <legend>Time boundaries</legend>
@@ -1016,6 +1392,37 @@ function ConstraintRail({ constraints, setConstraints }) {
               ))}
             </select>
           </label>
+        </div>
+      </fieldset>
+
+      <fieldset>
+        <legend>Breaks between classes</legend>
+        <div className="break-pref-options">
+          {[
+            { value: 'Compact', description: 'Keep gaps as short as possible' },
+            { value: 'Spaced', description: 'Prefer around 45 minutes between classes' },
+            { value: 'Long Break', description: 'Prefer around 90 minutes between classes' },
+          ].map((option) => (
+            <label
+              key={option.value}
+              className={constraints.break_pref === option.value ? 'break-pref-option selected' : 'break-pref-option'}
+            >
+              <input
+                type="checkbox"
+                name="break-preference"
+                value={option.value}
+                checked={constraints.break_pref === option.value}
+                onChange={(event) => setConstraints({
+                  ...constraints,
+                  break_pref: event.target.checked ? option.value : constraints.break_pref === option.value ? '' : constraints.break_pref,
+                })}
+              />
+              <span>
+                <strong>{option.value}</strong>
+                <small>{option.description}</small>
+              </span>
+            </label>
+          ))}
         </div>
       </fieldset>
 
@@ -1042,30 +1449,16 @@ function ConstraintRail({ constraints, setConstraints }) {
         </div>
       </fieldset>
 
+      <label className="constraint-toggle">
+        Minimize school days
+        <input type="checkbox" checked={constraints.minimize_school_days} onChange={(event) => setConstraints({ ...constraints, minimize_school_days: event.target.checked })} />
+      </label>
+
       <label>
         Max consecutive hours
         <input type="number" min="1" max="12" value={constraints.max_consecutive} onChange={(event) => setConstraints({ ...constraints, max_consecutive: Number(event.target.value) || 1 })} />
       </label>
 
-      <label>
-        Preferred earliest
-        <input type="time" value={constraints.pref_earliest} onChange={(event) => setConstraints({ ...constraints, pref_earliest: event.target.value })} />
-      </label>
-
-      <label>
-        Preferred latest
-        <input type="time" value={constraints.pref_latest} onChange={(event) => setConstraints({ ...constraints, pref_latest: event.target.value })} />
-      </label>
-
-      <label>
-        Avoid early classes
-        <input type="checkbox" checked={constraints.avoid_early} onChange={(event) => setConstraints({ ...constraints, avoid_early: event.target.checked })} />
-      </label>
-
-      <label>
-        Avoid night classes
-        <input type="checkbox" checked={constraints.avoid_night} onChange={(event) => setConstraints({ ...constraints, avoid_night: event.target.checked })} />
-      </label>
     </aside>
   )
 }

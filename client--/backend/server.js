@@ -8,7 +8,6 @@ import bcrypt from 'bcryptjs'
 import { buildSchedulePlan } from '../src/scheduler.js'
 import { authenticateUser, getAccount, getAdminUser, listAdminUsers, normalizeUsername, registerUser, savePlannerState, storageMode } from './data/store.js'
 
-// Constants
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const isProduction = process.env.NODE_ENV === 'production'
 const port = process.env.PORT || 5173
@@ -20,12 +19,10 @@ const ADMIN_SESSION_LIFETIME = 2 * 60 * 60 * 1000
 const userSessions = new Map()
 const USER_SESSION_LIFETIME = 12 * 60 * 60 * 1000
 
-// Cached production assets
 const templateHtml = isProduction
   ? await fs.readFile(path.join(projectRoot, 'dist/client/index.html'), 'utf-8')
   : ''
 
-// Create http server
 const app = express()
 app.use(express.json())
 
@@ -141,8 +138,6 @@ app.post('/api/auth/logout', requireUser, (req, res) => {
   res.json({ ok: true })
 })
 
-// Add Vite or respective production middlewares
-/** @type {import('vite').ViteDevServer | undefined} */
 let vite
 if (!isProduction) {
   const { createServer } = await import('vite')
@@ -198,17 +193,13 @@ app.put('/api/accounts/:username/state', requireUser, async (req, res) => {
   }
 })
 
-// Serve HTML
 app.use('*all', async (req, res) => {
   try {
     const url = req.originalUrl.replace(base, '')
 
-    /** @type {string} */
     let template
-    /** @type {import('../src/entry-server.js').render} */
     let render
     if (!isProduction) {
-      // Always read fresh template in development
       template = await fs.readFile(path.join(projectRoot, 'index.html'), 'utf-8')
       template = await vite.transformIndexHtml(url, template)
       render = (await vite.ssrLoadModule('/src/entry-server.jsx')).render
@@ -259,7 +250,6 @@ app.use('*all', async (req, res) => {
   }
 })
 
-// Start http server
 app.listen(port, () => {
   console.log(`Server started at http://localhost:${port} (${storageMode} storage)`)
 })
