@@ -1,3 +1,6 @@
+import multer from 'multer'
+import os from 'node:os'
+import { recognizeImage, parseScheduleText } from './ocr/ocrParser.js'
 import fs from 'node:fs/promises'
 import express from 'express'
 import { Transform } from 'node:stream'
@@ -25,6 +28,40 @@ const templateHtml = isProduction
 
 const app = express()
 app.use(express.json())
+
+const upload = multer({
+  dest: path.join(os.tmpdir(), 'class-schedule-ocr'),
+  limits: {
+    fileSize: 10 * 1024 * 1024,
+    files: 1,
+  },
+  fileFilter: (_req, file, callback) => {
+    const allowedTypes = [
+      'image/jpeg',
+      'image/png',
+      'image/webp',
+    ]
+
+    if (!allowedTypes.includes(file.mimetype)) {
+      return callback(new Error('Only JPG, PNG, and WebP images are allowed.'))
+    }
+
+    callback(null, true)
+  },
+})
+
+const uploadScheduleImage = (req, res, next) => {
+  upload.single('scheduleImage')(req, res, (error) => {
+    if (error) {
+      return res.status(400).json({
+        ok: false,
+        error: error.message || 'Unable to upload image.',
+      })
+    }
+
+    next()
+  })
+}
 
 const issueUserSession = (username) => {
   const token = randomBytes(32).toString('hex')
@@ -163,6 +200,48 @@ app.post('/api/schedules/plan', (req, res) => {
   } catch (error) {
     console.error(error)
     res.status(400).json({ error: 'Unable to build a schedule plan.' })
+  }
+})
+
+app.post('/api/ocr/upload', uploadScheduleImage, async (req, res) => {
+  let uploadedFilePath = null
+
+  try {
+    if (!req.file) {
+      return res.status(400).json({
+        ok: false,
+        error: 'Please upload a schedule image.',
+      })
+    }
+
+    uploadedFilePath = req.file.path
+
+    console.log('OCR image received:', req.file.originalname)
+
+    const rawText = await recognizeImage(uploadedFilePath)
+    const parsed = parseScheduleText(rawText)
+
+    res.json({
+      ok: true,
+      originalFileName: req.file.originalname,
+      rawText,
+      ...parsed,
+    })
+  } catch (error) {
+    console.error('OCR error:', error)
+
+    res.status(500).json({
+      ok: false,
+      error: error.message || 'Unable to process the schedule image.',
+    })
+  } finally {
+    if (uploadedFilePath) {
+      try {
+        await fs.unlink(uploadedFilePath)
+      } catch (cleanupError) {
+        console.error('Could not delete temporary OCR file:', cleanupError)
+      }
+    }
   }
 })
 
